@@ -1,139 +1,94 @@
 name: Docker
 
 on:
+  schedule:
+    - cron: '23 21 * * *'
   push:
-    branches:
-      - "master"
-    tags:
-      - "*"
-    paths-ignore:
-      - ".github/**"
-      - "!.github/workflows/docker.yml"
-      - ".vscode/**"
-      - ".gitignore"
-      - ".gitlab-ci.yml"
-      - "LICENSE"
-      - "README"
+    branches: [ "master" ]
+    # Publish semver tags as releases.
+    tags: [ 'v*.*.*' ]
   pull_request:
-    branches:
-      - "master"
-    paths:
-      - "Dockerfile"
-  workflow_dispatch:
+    branches: [ "master" ]
+
+env:
+  # Use docker.io for Docker Hub if empty
+  REGISTRY: ghcr.io
+  # github.repository as <account>/<repo>
+  IMAGE_NAME: ${{ github.repository }}
+
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        architecture: [linux/amd64, linux/arm64]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v2
-        with:
-          submodules: "recursive"
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v1
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v1
-      - name: Cache Docker layers
-        uses: actions/cache@v2
-        with:
-          path: /tmp/.buildx-cache/${{ matrix.architecture }}
-          key: ${{ runner.os }}-buildx-${{ matrix.architecture }}-${{ github.sha }}
-      - name: Build
-        uses: docker/build-push-action@v2
-        with:
-          context: .
-          platforms: ${{ matrix.architecture }}
-          cache-from: type=local,src=/tmp/.buildx-cache/${{ matrix.architecture }}
-          cache-to: type=local,dest=/tmp/.buildx-cache-new/${{ matrix.architecture }},mode=max
-      - name: Move cache
-        run: |
-          rm -rf /tmp/.buildx-cache/${{ matrix.architecture }}
-          mv /tmp/.buildx-cache-new/${{ matrix.architecture }} /tmp/.buildx-cache/${{ matrix.architecture }}
+  build:
 
-  publish_amd64:
-    needs: [test]
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v2
-        with:
-          submodules: "recursive"
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v1
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v1
-      - name: Cache amd64 Docker layers
-        uses: actions/cache@v2
-        with:
-          path: /tmp/.buildx-cache/linux/amd64
-          key: ${{ runner.os }}-buildx-linux/amd64-${{ github.sha }}
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v3
-        with:
-          images: potatosus/autumn:latest, ghcr.io/revoltchat/autumn:latest
-      - name: Login to DockerHub
-        uses: docker/login-action@v1
-        with:
-          username: potatosus
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v1
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GH_TOKEN }}
-      - name: Build and publish
-        uses: docker/build-push-action@v2
-        with:
-          context: .
-          push: true
-          platforms: linux/amd64
-          tags: potatosus/autumn:latest
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=local,src=/tmp/.buildx-cache/linux/amd64
-          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
-      - name: Move cache
-        run: |
-          rm -rf /tmp/.buildx-cache
-          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+    permissions:
+      contents: read
+      packages: write
+      # This is used to complete the identity challenge
+      # with sigstore/fulcio when running outside of PRs.
+      id-token: write
 
-  publish_arm64:
-    needs: [test]
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v2
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      # Install the cosign tool except on PR
+      # https://github.com/sigstore/cosign-installer
+      - name: Install cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@6e04d228eb30da1757ee4e1dd75a0ec73a653e06 #v3.1.1
         with:
-          submodules: "recursive"
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v3
+          cosign-release: 'v2.1.1'
+
+      # Set up BuildKit Docker container builder to be able to build
+      # multi-platform images and export cache
+      # https://github.com/docker/setup-buildx-action
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f95db51fddba0c2d1ec667646a06c2ce06100226 # v3.0.0
+
+      # Login against a Docker registry except on PR
+      # https://github.com/docker/login-action
+      - name: Log into registry ${{ env.REGISTRY }}
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@343f7c4344506bcbf9b4de18042ae17996df046d # v3.0.0
         with:
-          images: potatosus/autumn:latest, ghcr.io/revoltchat/autumn:latest
-      - name: Login to DockerHub
-        uses: docker/login-action@v1
-        with:
-          username: potatosus
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v1
-        with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GH_TOKEN }}
-      - name: Build and publish
-        uses: docker/build-push-action@v2
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Extract metadata (tags, labels) for Docker
+      # https://github.com/docker/metadata-action
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@96383f45573cb7f253c731d3b3ab81c87ef81934 # v5.0.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      # Build and push Docker image with Buildx (don't push on PR)
+      # https://github.com/docker/build-push-action
+      - name: Build and push Docker image
+        id: build-and-push
+        uses: docker/build-push-action@0565240e2d4ab88bba5387d719585280857ece09 # v5.0.0
         with:
           context: .
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           platforms: linux/arm64
-          tags: potatosus/autumn:latest
+          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=local,src=/tmp/.buildx-cache/linux/arm64
-          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Sign the resulting Docker image digest except on PRs.
+      # This will only write to the public Rekor transparency log when the Docker
+      # repository is public to avoid leaking data.  If you would like to publish
+      # transparency data even for private images, pass --force to cosign below.
+      # https://github.com/sigstore/cosign
+      - name: Sign the published Docker image
+        if: ${{ github.event_name != 'pull_request' }}
+        env:
+          # https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#using-an-intermediate-environment-variable
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build-and-push.outputs.digest }}
+        # This step uses the identity token to provision an ephemeral certificate
+        # against the sigstore community Fulcio instance.
+        run: echo "${TAGS}" | xargs -I {} cosign sign --yes {}@${DIGEST}
